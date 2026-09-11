@@ -213,6 +213,15 @@ round(sapply(dims, \(x) mean(x == 0, na.rm = TRUE) * 100), 1)
 round(cor(dims, use = "pairwise.complete.obs"), 3)
                                                 # correlaciones entre las cuatro
 
+# Por qué tasas y no conteos 
+# Las variables de conteo del censo son en gran medida una función de cuánta
+# gente vive en la manzana. Si el índice se construyera con ellas, terminaría
+# midiendo población en vez de nivel socioeconómico.
+
+round(c(hogares  = cor(urb$n_hog[urb$hab],      urb$n_per[urb$hab]),
+        ocupados = cor(urb$n_ocupado[urb$hab],  urb$n_per[urb$hab]),
+        internet = cor(urb$n_internet[urb$hab], urb$n_per[urb$hab])), 3)
+
 #-------------------------------------------------------------------------------
 ## PASO 5. Ponderar las dimensiones con componentes principales ##
 #-------------------------------------------------------------------------------
@@ -281,17 +290,27 @@ round(q, 3)
 urb$ismt_cat <- cut(urb$ismt, q, include.lowest = TRUE,
                     labels = c("Bajo", "Medio bajo", "Medio", "Medio alto", "Alto"))
 
+# Demanda potencial: población residente ponderada por el nivel socioeconómico
+# de la manzana. En las manzanas sin residentes la demanda residente es CERO,
+# no un dato faltante, por eso se asigna 0 y no NA.
+
+urb$dp <- urb$n_per * urb$ismt
+urb$dp[!urb$hab] <- 0
+
+summary(urb$dp)
+sum(urb$dp, na.rm = TRUE)        # masa total de demanda potencial
+
 # Perfil de cada categoría: sirve para verificar que el índice ordena bien
 
 urb %>% st_drop_geometry() %>% filter(hab) %>%
   group_by(ismt_cat) %>%
-  summarise(manzanas   = n(),
-            poblacion  = sum(n_per),
+  summarise(manzanas    = n(),
+            poblacion   = sum(n_per),
             escolaridad = round(mean(escol, na.rm = TRUE), 1),
-            hacinam    = round(mean(p_hac) * 100, 1),
-            precario   = round(mean(p_prec) * 100, 2)) %>%
-  as.data.frame()  
-
+            hacinam     = round(mean(p_hac) * 100, 1),
+            precario    = round(mean(p_prec) * 100, 2),
+            demanda     = round(sum(dp, na.rm = TRUE))) %>%
+  as.data.frame()
 
 #-------------------------------------------------------------------------------
 ## PASO 7. Validación externa del índice ##
@@ -347,13 +366,63 @@ ggplot(urb) +
 # PASO 9. Guardar la capa con el índice ---------------------------------------
 #-------------------------------------------------------------------------------
 
-st_write(urb,
-         "Avance_proyecto_1/03_output/manzanas_ismt.gpkg",
-         delete_dsn = TRUE)
+"dp" %in% names(urb)        # verificación: debe dar TRUE
 
-# delete_dsn = TRUE sobrescribe si el archivo ya existe.
-# Sin eso, st_write falla en vez de reemplazar.
+st_write(urb, "03_output/manzanas_ismt.gpkg", delete_dsn = TRUE)
 
-ggsave("Avance_proyecto_1/03_output/mapa_ismt.png",
-       width = 9.5, height = 8, dpi = 200, bg = "white")
-# guarda el último gráfico dibujado
+ggsave("03_output/mapa_ismt.png", width = 9.5, height = 8, dpi = 200, bg = "white")
+
+#-------------------------------------------------------------------------------
+## PASO 10. Cobertura de la oferta comercial ##
+#-------------------------------------------------------------------------------
+cc <- st_read(list.files(recursive = TRUE, pattern = "centros.*\\.gpkg$",
+                         full.names = TRUE)[1], quiet = TRUE)
+cc <- st_transform(cc, 32718)
+nrow(cc)                                   # debe dar 30
+
+pts   <- st_point_on_surface(urb)          # punto interior de cada manzana
+total <- sum(urb$dp, na.rm = TRUE)         # 151.036
+
+for (r in c(300, 500, 800)) {
+  buf    <- st_union(st_buffer(cc, r))     # buffer disuelto, para no contar
+  # dos veces una manzana que cae
+  # dentro de dos círculos
+  dentro <- lengths(st_intersects(pts, buf)) > 0
+  
+  cat(sprintf("%4d m | %4d manzanas (%4.1f%%) | %5.1f%% de la demanda potencial\n",
+              r, sum(dentro), mean(dentro) * 100,
+              sum(urb$dp[dentro], na.rm = TRUE) / total * 100))
+}
+
+#-------------------------------------------------------------------------------
+## PASO 11. Tabla de estadísticas descriptivas ##
+#-------------------------------------------------------------------------------
+
+v <- st_drop_geometry(urb)
+h <- v[v$hab, ]          # solo manzanas habitadas
+
+fila <- function(nombre, x) {
+  x <- x[!is.na(x)]
+  data.frame(Variable = nombre,
+             N       = length(x),
+             Media   = round(mean(x), 2),
+             Mediana = round(median(x), 2),
+             Minimo  = round(min(x), 2),
+             Maximo  = round(max(x), 2))
+}
+
+tabla <- rbind(
+  fila("Población residente",                 v$n_per),
+  fila("Hogares",                             v$n_hog),
+  fila("Superficie (m²)",                     v$area_km2 * 1e6),
+  fila("Demanda potencial",                   v$dp),
+  fila("Escolaridad 18+ (años)",              h$escol),
+  fila("Viviendas hacinadas (%)",             h$p_hac  * 100),
+  fila("Hogares allegados (%)",               h$p_alle * 100),
+  fila("Materialidad deficiente (%)",         h$p_prec * 100),
+  fila("ISMT (0–1)",                          h$ismt)
+)
+
+tabla
+
+write.csv(tabla, "03_output/tabla_2_9.csv", row.names = FALSE, fileEncoding = "UTF-8")
